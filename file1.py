@@ -3,7 +3,47 @@ import cv2
 import numpy as np
 import streamlit as st
 import mediapipe as mp
-from utils import calculate_ear, calculate_mar, estimate_head_pose
+
+# ==========================================
+# HELPER FUNCTIONS & ALGORITHMS
+# ==========================================
+
+def calculate_ear(landmarks, eye_indices, width, height):
+    """Computes Eye Aspect Ratio (EAR) using Euclidean distances."""
+    pts = np.array([[landmarks[i].x * width, landmarks[i].y * height] for i in eye_indices])
+    v1 = np.linalg.norm(pts[1] - pts[5])
+    v2 = np.linalg.norm(pts[2] - pts[4])
+    h = np.linalg.norm(pts[0] - pts[3])
+    return (v1 + v2) / (2.0 * h) if h > 0 else 0.0
+
+def calculate_mar(landmarks, mouth_indices, width, height):
+    """Computes Mouth Aspect Ratio (MAR) to monitor yawning."""
+    pts = np.array([[landmarks[i].x * width, landmarks[i].y * height] for i in mouth_indices])
+    vertical = np.linalg.norm(pts[2] - pts[3])
+    horizontal = np.linalg.norm(pts[0] - pts[1])
+    return vertical / horizontal if horizontal > 0 else 0.0
+
+def estimate_head_pose(landmarks, width, height):
+    """Estimates head orientation (Forward, Left, Right)."""
+    nose_x = landmarks[1].x * width
+    left_jaw_x = landmarks[234].x * width
+    right_jaw_x = landmarks[454].x * width
+    
+    face_width = right_jaw_x - left_jaw_x
+    if face_width <= 0:
+        return "FORWARD"
+        
+    relative_pos = (nose_x - left_jaw_x) / face_width
+    if relative_pos < 0.35:
+        return "TURNED LEFT"
+    elif relative_pos > 0.65:
+        return "TURNED RIGHT"
+    else:
+        return "FORWARD"
+
+# ==========================================
+# STREAMLIT USER INTERFACE & MAIN APP
+# ==========================================
 
 st.set_page_config(page_title="WakeUP - Driver Fatigue Monitor", layout="wide")
 
@@ -26,12 +66,16 @@ with col2:
     status_metric = st.empty()
     ear_metric = st.empty()
     mar_metric = st.empty()
+    pose_metric = st.empty()
 
 # Initialize MediaPipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5)
 
 eye_closed_start_time = None
+avg_ear = 0.0
+mar = 0.0
+head_status = "FORWARD"
 
 if run_system:
     cap = cv2.VideoCapture(0)
@@ -61,7 +105,9 @@ if run_system:
             right_ear = calculate_ear(landmarks, RIGHT_EYE, w, h)
             avg_ear = (left_ear + right_ear) / 2.0
             mar = calculate_mar(landmarks, MOUTH, w, h)
+            head_status = estimate_head_pose(landmarks, w, h)
             
+            # Drowsiness check
             if avg_ear < ear_threshold:
                 if eye_closed_start_time is None:
                     eye_closed_start_time = time.time()
@@ -71,8 +117,14 @@ if run_system:
             else:
                 eye_closed_start_time = None
 
+            # Yawn check
             if mar > mar_threshold:
                 status_text = "⚠️ YAWN DETECTED!"
+                status_color = (0, 165, 255)
+
+            # Head pose check
+            if head_status != "FORWARD":
+                status_text = f"⚠️ DISTRACTION ({head_status})!"
                 status_color = (0, 165, 255)
 
             cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
@@ -81,8 +133,9 @@ if run_system:
         video_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
         
         status_metric.metric("State", status_text)
-        ear_metric.metric("EAR", f"{avg_ear:.3f}" if 'avg_ear' in locals() else "N/A")
-        mar_metric.metric("MAR", f"{mar:.3f}" if 'mar' in locals() else "N/A")
+        ear_metric.metric("EAR", f"{avg_ear:.3f}")
+        mar_metric.metric("MAR", f"{mar:.3f}")
+        pose_metric.metric("Head Pose", head_status)
         
     cap.release()
 else:
